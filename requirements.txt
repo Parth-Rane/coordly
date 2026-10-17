@@ -1,0 +1,6 @@
+streamlit>=1.36,<2
+python-telegram-bot>=21,<23
+python-dotenv>=1,<2
+supabase>=2.15,<3
+psycopg[binary]>=3.2,<4
+pytest>=8,<9
