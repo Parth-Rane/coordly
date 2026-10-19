@@ -33,6 +33,104 @@ st.set_page_config(
 )
 settings = get_settings()
 
+
+@st.cache_data(ttl=2, show_spinner=False)
+def load_project_snapshot(db_path: str) -> dict[str, Any]:
+    return build_project_snapshot(db_path)
+
+
+st.markdown(
+    """
+    <style>
+    @keyframes ts-button-loading {
+      to { transform: rotate(360deg); }
+    }
+    .ts-processing-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 99999;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(7, 9, 14, 0.52);
+      backdrop-filter: blur(3px);
+      pointer-events: none;
+    }
+    body:has(img[alt="Running..."]) .ts-processing-overlay {
+      display: flex;
+    }
+    .ts-processing-card {
+      display: grid;
+      width: 180px;
+      height: 140px;
+      place-items: center;
+      padding: 0;
+      border: 1px solid rgba(167, 139, 250, 0.42);
+      border-radius: 18px;
+      background: rgba(15, 23, 42, 0.96);
+      box-shadow: 0 14px 42px rgba(0, 0, 0, 0.5),
+        0 0 30px rgba(139, 92, 246, 0.18);
+      color: #f8fafc;
+      font-size: 0.78rem;
+      font-weight: 650;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .ts-processing-spinner {
+      grid-area: 1 / 1;
+      align-self: center;
+      justify-self: center;
+      width: 2.7rem;
+      height: 2.7rem;
+      margin: 0;
+      border: 4px solid rgba(167, 139, 250, 0.24);
+      border-top-color: #a78bfa;
+      border-right-color: #38bdf8;
+      border-radius: 50%;
+      animation: ts-button-loading 0.75s linear infinite;
+      filter: drop-shadow(0 0 10px rgba(167, 139, 250, 0.55));
+    }
+    .ts-processing-label {
+      grid-area: 1 / 1;
+      align-self: end;
+      justify-self: center;
+      margin-bottom: 1rem;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ts-processing-spinner {
+        animation-duration: 1.8s;
+      }
+    }
+    .stButton > button:active::after,
+    [data-testid="stFormSubmitButton"] button:active::after {
+      content: "";
+      display: inline-block;
+      width: 0.85rem;
+      height: 0.85rem;
+      margin-left: 0.55rem;
+      vertical-align: -0.12rem;
+      border: 2px solid currentColor;
+      border-right-color: transparent;
+      border-radius: 50%;
+      animation: ts-button-loading 0.7s linear infinite;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    """
+    <div class="ts-processing-overlay" role="status" aria-live="polite">
+      <div class="ts-processing-card">
+        <span class="ts-processing-spinner" aria-hidden="true"></span>
+        <span class="ts-processing-label">Loading</span>
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.markdown(
     """
     <style>
@@ -911,14 +1009,24 @@ if st.session_state.get("teamsync_reduce_motion", False):
 def _auth_screen() -> None:
     auth_ready = bool(settings.supabase_url and settings.supabase_anon_key)
     db_ready = settings.database_backend == "supabase" and bool(settings.supabase_db_url)
-    client = None
-    database_issue = None
-    if auth_ready:
+
+    def check_workspace() -> bool:
+        if not auth_ready or not db_ready:
+            return False
+        database_issue = database.check_database_connection(settings.supabase_db_url)
+        if database_issue:
+            st.error(database_issue)
+            return False
         try:
-            client = create_client(settings.supabase_url, settings.supabase_anon_key)
-        except (ValueError, HTTPError) as exc:
-            st.error(f"Could not initialize Supabase Auth: {exc}")
-            st.stop()
+            database.connect(settings.database_path).close()
+        except (PostgresError, OSError, RuntimeError, ValueError) as exc:
+            st.error(
+                "Supabase is reachable, but the workspace schema could not be initialized: "
+                f"{exc}"
+            )
+            return False
+        return True
+
     hero_col, center_col = st.columns([1.15, 0.85], gap="large", vertical_alignment="center")
     with hero_col:
         st.markdown(
@@ -948,16 +1056,6 @@ def _auth_screen() -> None:
             st.error("Set SUPABASE_URL and SUPABASE_ANON_KEY in `.env` to enable Supabase login.")
         elif not db_ready:
             st.error("Set DATABASE_BACKEND=supabase and SUPABASE_DB_URL to enable the workspace.")
-        else:
-            database_issue = database.check_database_connection(settings.supabase_db_url)
-            if database_issue:
-                st.error(database_issue)
-            else:
-                try:
-                    database.connect(settings.database_path).close()
-                except (PostgresError, OSError, RuntimeError, ValueError) as exc:
-                    database_issue = f"Supabase is reachable, but the workspace schema could not be initialized: {exc}"
-                    st.error(database_issue)
         st.info(
             "Open registration is enabled. All registered accounts share this project workspace."
         )
@@ -968,29 +1066,34 @@ def _auth_screen() -> None:
                 password = st.text_input("Password", type="password", key="ts-login-password")
                 submitted = st.form_submit_button(
                     "Log in", type="primary",
-                    disabled=not auth_ready or not db_ready or database_issue is not None,
+                    disabled=not auth_ready or not db_ready,
                     use_container_width=True,
                 )
             if submitted:
                 if not email.strip() or not password:
                     st.error("Enter both your email and password.")
                 else:
-                    try:
-                        result = client.auth.sign_in_with_password(
-                            {"email": email.strip(), "password": password}
-                        )
-                        if not result.session:
-                            st.error("No session returned. Verify your email or check your credentials.")
-                        else:
-                            st.session_state["ts_access_token"] = result.session.access_token
-                            st.session_state["ts_refresh_token"] = result.session.refresh_token
-                            user = getattr(result, "user", None) or getattr(result.session, "user", None)
-                            if user:
-                                st.session_state["ts_user_id"] = getattr(user, "id", None) or email.strip().lower()
-                                st.session_state["ts_user_name"] = getattr(user, "email", None) or email.strip()
-                            st.rerun()
-                    except (AuthError, HTTPError) as exc:
-                        st.error(f"Sign-in failed: {exc}")
+                    with st.spinner("Checking workspace and signing in..."):
+                        if check_workspace():
+                            try:
+                                client = create_client(
+                                    settings.supabase_url, settings.supabase_anon_key
+                                )
+                                result = client.auth.sign_in_with_password(
+                                    {"email": email.strip(), "password": password}
+                                )
+                                if not result.session:
+                                    st.error("No session returned. Verify your email or check your credentials.")
+                                else:
+                                    st.session_state["ts_access_token"] = result.session.access_token
+                                    st.session_state["ts_refresh_token"] = result.session.refresh_token
+                                    user = getattr(result, "user", None) or getattr(result.session, "user", None)
+                                    if user:
+                                        st.session_state["ts_user_id"] = getattr(user, "id", None) or email.strip().lower()
+                                        st.session_state["ts_user_name"] = getattr(user, "email", None) or email.strip()
+                                    st.rerun()
+                            except (AuthError, HTTPError, ValueError) as exc:
+                                st.error(f"Sign-in failed: {exc}")
         with register_tab:
             with st.form("teamsync_signup"):
                 email = st.text_input("Email", key="ts-signup-email")
@@ -998,7 +1101,7 @@ def _auth_screen() -> None:
                 confirm = st.text_input("Confirm password", type="password", key="ts-signup-confirm")
                 submitted = st.form_submit_button(
                     "Create account",
-                    disabled=not auth_ready or not db_ready or database_issue is not None,
+                    disabled=not auth_ready or not db_ready,
                     use_container_width=True,
                 )
             if submitted:
@@ -1009,20 +1112,27 @@ def _auth_screen() -> None:
                 elif password != confirm:
                     st.error("The passwords do not match.")
                 else:
-                    try:
-                        result = client.auth.sign_up({"email": email.strip(), "password": password})
-                        if result.session:
-                            st.session_state["ts_access_token"] = result.session.access_token
-                            st.session_state["ts_refresh_token"] = result.session.refresh_token
-                            user = getattr(result, "user", None) or getattr(result.session, "user", None)
-                            if user:
-                                st.session_state["ts_user_id"] = getattr(user, "id", None) or email.strip().lower()
-                                st.session_state["ts_user_name"] = getattr(user, "email", None) or email.strip()
-                            st.rerun()
-                        else:
-                            st.success("Account created. Verify your email, then log in.")
-                    except (AuthError, HTTPError) as exc:
-                        st.error(f"Registration failed: {exc}")
+                    with st.spinner("Checking workspace and creating your account..."):
+                        if check_workspace():
+                            try:
+                                client = create_client(
+                                    settings.supabase_url, settings.supabase_anon_key
+                                )
+                                result = client.auth.sign_up(
+                                    {"email": email.strip(), "password": password}
+                                )
+                                if result.session:
+                                    st.session_state["ts_access_token"] = result.session.access_token
+                                    st.session_state["ts_refresh_token"] = result.session.refresh_token
+                                    user = getattr(result, "user", None) or getattr(result.session, "user", None)
+                                    if user:
+                                        st.session_state["ts_user_id"] = getattr(user, "id", None) or email.strip().lower()
+                                        st.session_state["ts_user_name"] = getattr(user, "email", None) or email.strip()
+                                    st.rerun()
+                                else:
+                                    st.success("Account created. Verify your email, then log in.")
+                            except (AuthError, HTTPError, ValueError) as exc:
+                                st.error(f"Registration failed: {exc}")
 
 
 def _format_time(value: str | None) -> str:
@@ -1324,7 +1434,8 @@ current_user_name = str(st.session_state.get("ts_user_name") or "Workspace manag
 
 try:
     connection_issue = None
-    snapshot = build_project_snapshot(settings.database_path)
+    with st.spinner("Loading workspace..."):
+        snapshot = load_project_snapshot(settings.database_path)
     project_record = database.get_project(settings.database_path)
     unread_message_ids = database.get_unread_message_ids(
         settings.database_path, current_user_id
