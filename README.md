@@ -32,7 +32,19 @@ pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-Edit `.env` locally. Never commit it. Follow the Supabase setup below, then initialize its schema with:
+Edit `.env` locally. Never commit it. Settings can also be supplied through
+Streamlit secrets: create `.streamlit/secrets.toml` locally and put the same
+`KEY = "value"` settings from `.env` there. This file is ignored by Git. The app
+uses environment variables (including `.env`) first, then falls back to
+`st.secrets`; this lets local development and Streamlit Community Cloud use the
+same configuration.
+
+For Streamlit Community Cloud, open the deployed app's **Settings → Secrets**
+and paste the TOML settings there. Do not upload `.env` or `secrets.toml`, and
+never put secrets in source code. The Supabase database URI contains a password;
+keep it private and rotate it if it has been exposed.
+
+Follow the Supabase setup below, then initialize its schema with:
 
 ```powershell
 python database.py
